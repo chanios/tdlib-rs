@@ -7,8 +7,8 @@
 // <LICENSE-MIT or https://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-use futures_channel::oneshot;
 use serde_json::Value;
+use tokio::sync::oneshot;
 use std::collections::HashMap;
 use std::sync::RwLock;
 

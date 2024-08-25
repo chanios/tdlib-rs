@@ -17,7 +17,9 @@ pub use generated::{enums, functions, types};
 use enums::Update;
 use once_cell::sync::Lazy;
 use serde_json::Value;
-use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::{sync::oneshot::error::TryRecvError, time::sleep};
+use std::{sync::atomic::{AtomicU32, Ordering}, time::Duration};
+use regex::Regex;
 
 static EXTRA_COUNTER: AtomicU32 = AtomicU32::new(0);
 static OBSERVER: Lazy<observer::Observer> = Lazy::new(observer::Observer::new);
@@ -62,12 +64,41 @@ pub fn receive() -> Option<(Update, i32)> {
     None
 }
 
+static RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"retry after (\d+)").unwrap());
+
 pub(crate) async fn send_request(client_id: i32, mut request: Value) -> Value {
-    let extra = EXTRA_COUNTER.fetch_add(1, Ordering::Relaxed);
-    request["@extra"] = serde_json::to_value(extra).unwrap();
+    loop {
+        let extra = EXTRA_COUNTER.fetch_add(1, Ordering::Relaxed);
+        request["@extra"] = serde_json::to_value(extra).unwrap();
 
-    let receiver = OBSERVER.subscribe(extra);
-    tdjson::send(client_id, request.to_string());
+        let mut receiver = OBSERVER.subscribe(extra);
+        tdjson::send(client_id, request.to_string());
 
-    receiver.await.unwrap()
+        loop {
+            match receiver.try_recv() {
+                Ok(v) => {
+                    // println!("req{:?} res{:?}",request,v);
+                    if v["code"].as_i64() == Some(429) {
+                        if let Some(message_reason) = v["message"].as_str() {
+                            if let Some(captures) = RE.captures(message_reason) {
+                                if let Some(second_str) = captures.get(1) {
+                                    let seconds = second_str.as_str().parse().unwrap();
+                                    println!("Wait for {} seconds", seconds);
+                                    sleep(Duration::from_secs(seconds)).await;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    return v
+                }
+                Err(TryRecvError::Empty) => {
+                    sleep(Duration::from_millis(10)).await;
+                }
+                Err(TryRecvError::Closed) => {
+                    panic!("Closed");
+                }
+            }
+        }
+    }
 }
